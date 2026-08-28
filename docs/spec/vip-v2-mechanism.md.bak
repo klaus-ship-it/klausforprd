@@ -1,0 +1,218 @@
+# VIP 機制規格書 v2（重新設計版）
+
+- 版本：v2.0-draft
+- 日期：2026-08-20
+- 狀態：**草案，待 Cooper 逐項確認/調整數值後定案**
+- 取代：`VIP.md` 中的 OPE-1002/1003/1004（該文件本身混雜新舊兩版，本文件為重新討論後的單一版本，不再沿用其任何一版數字）
+- 決策依據：[docs/decisions/2026-08-20-vip-mechanism-redesign.md](../decisions/2026-08-20-vip-mechanism-redesign.md)（本文件每一條機制設計都對應該檔案裡的一條決策 D1~D13，可回查理由與放棄方案）
+- 現況落差對照：[docs/analysis/2026-08-20-vip-spec-vs-implementation.md](../analysis/2026-08-20-vip-spec-vs-implementation.md)
+
+---
+
+## 1. 功能概述
+
+VIP 機制依玩家「終生累積儲值」與「終生累積流水」雙軌門檻，將玩家分為 VIP0～VIP15 共 16 級。晉升後可能透過「月度保級考核」被降級，降級規則簡單（固定降 1 級），晉升時發放一次性升級獎勵（透過既有彩金/打碼系統發放）。詳細機制取捨見決策紀錄 D1~D13。
+
+**與原規格書 `VIP.md` 的重大差異（務必留意）：**
+1. **拿掉「綁定手機號碼」等特殊晉升條件**——所有等級一律只看儲值＋流水雙軌門檻（決策 D11）
+2. **拿掉週期性零用金/生日禮金/安慰金**——本輪只設計一次性升級獎勵，其餘留待之後討論（決策 D6）
+3. **等級門檻數值全部重新推導**，不沿用 `VIP.md` 新版或舊版的任何數字（決策 D13）
+4. 保級降級的緩衝欄位設計簡化為「布林保護期 + 固定降 1 級」，不採用原規格書「Retention 數值扣減式緩衝」的設計（該設計實際效果經核算等同於「保護期＋單月即時判定」，本版直接用更直觀的方式表達，行為結果一致）
+
+---
+
+## 2. 資料模型
+
+### 2.1 `VIPLevel`（取代現有 [src/types/vip.ts](../../src/types/vip.ts)）
+
+```typescript
+export interface VIPLevel {
+    rank: number // 0-15，唯一，不可重複，數字越大等級越高
+    name: string
+    status: 'ACTIVE' | 'INACTIVE' // 新增：啟用/停用
+    icon_url?: string
+    avatar_frame_url?: string
+
+    // 晉升條件（終生累積，決策 D1/D2）
+    promo_deposit: number   // 終生累積儲值門檻
+    promo_turnover: number  // 終生累積流水門檻
+    // 決策 D11：不再有 promo_special / bind_data 特殊條件欄位
+
+    // 保級條件（當月累積，決策 D1）
+    is_perpetual: boolean   // true = 無條件保級（VIP0~2 預設）
+    retain_deposit: number
+    retain_turnover: number
+    retain_active_days: number
+
+    // 一次性升級獎勵（決策 D6/D7，透過 BonusCard 發放）
+    upgrade_reward_currency?: 'BRONZE' | 'SILVER'
+    upgrade_reward_amount?: number
+    upgrade_reward_turnover_multiplier?: number // 僅 SILVER，預設 1
+    upgrade_reward_conversion_cap?: number      // 僅 SILVER，預設 = amount
+
+    // 權益
+    gift_fee_rate: number  // P2P 贈禮手續費 %
+    rebate_rate: number    // 投注返水 %
+
+    // 文案（三語系，沿用現有結構）
+    promotion_desc: string
+    retention_desc: string
+    promotion_desc_zh_tw?: string; promotion_desc_zh_cn?: string; promotion_desc_en?: string
+    retention_desc_zh_tw?: string; retention_desc_zh_cn?: string; retention_desc_en?: string
+
+    // 稽核（新增，決策對照落差報告問題 3）
+    updated_by: string
+    updated_at: string
+}
+```
+
+**與現有型別的差異**：新增 `status`、`updated_by`、`updated_at`；移除 `promo_special`、`bind_data`。
+
+### 2.2 `Player` 新增欄位（決策 D8）
+
+```typescript
+// 追加於 src/types/player.ts 的 Player interface
+vip_lifetime_deposit: number       // 終生累積儲值（晉升判斷用，不因降級而減少）
+vip_lifetime_turnover: number      // 終生累積流水
+vip_current_month_deposit: number  // 當月累積儲值（保級判斷用，月結後歸零重算）
+vip_current_month_turnover: number
+vip_current_month_active_days: number
+vip_historical_max_level: number   // 歷史最高等級（防重複領獎判斷用）
+vip_retention_grace: boolean       // 是否處於晉升當月保護期
+vip_reward_claimed_levels: number[] // 已核發一次性獎勵的等級清單
+```
+
+### 2.3 `VIPAuditLog`（新增型別，對應 OPE-1004）
+
+```typescript
+export interface VIPAuditLog {
+    id: string
+    player_id: string
+    player_username: string
+    old_level: number
+    new_level: number
+    action_type: 'AUTO_PROMOTE' | 'AUTO_DEMOTE' | 'RETAIN_SUCCESS' | 'MANUAL_ADJUST'
+    trigger_reason: string // 條件達成 / 保級失敗 / 客服手動調整 / 其他
+    snapshot: {
+        lifetime_deposit: number
+        lifetime_turnover: number
+        month_deposit: number
+        month_turnover: number
+        month_active_days: number
+    } // 變動當下的數據快照，供事後稽核
+    reward_reissued: boolean // 手動調級時是否有補發跨級獎勵（決策 D10）
+    operator: string // 'SYSTEM' 或管理員帳號
+    remark?: string // 手動調整時的必填異動原因（決策 D10）
+    created_at: string
+}
+```
+
+---
+
+## 3. 業務流程
+
+### 3.1 晉升判斷（每次玩家儲值/下注後即時檢查，或後台批次掃描——實作細節待後端排期，此處先定義判斷邏輯本身）
+
+1. 讀取玩家 `vip_lifetime_deposit` / `vip_lifetime_turnover`
+2. 找出「目前等級的下一級」是否 `lifetime_deposit ≥ promo_deposit` 且 `lifetime_turnover ≥ promo_turnover`（雙軌都要達標，決策 D1），若連續多級都達標則直接跳到最高可達等級（跳級晉升）
+3. 若達標：
+   - 更新 `Player.vip_level` = 新等級
+   - 若 `新等級 > vip_historical_max_level`：更新 `vip_historical_max_level` = 新等級
+   - 設定 `vip_retention_grace = true`（進入保護期，決策 D5）
+   - 對「新等級」以及跳級路徑上所有**尚未領過**的等級（`不在 vip_reward_claimed_levels`），逐一發放一次性升級獎勵（決策 D4 防迴圈），並將這些等級加入 `vip_reward_claimed_levels`
+   - 寫入 `VIPAuditLog`，`action_type = AUTO_PROMOTE`
+
+### 3.2 保級/降級結算（月底批次，實作細節待後端排期）
+
+對每位玩家：
+1. 若 `vip_retention_grace === true`：本月跳過考核，結算後將 `vip_retention_grace` 設回 `false`，等級不變（決策 D5）
+2. 否則，若目前等級 `is_perpetual === true`（VIP0~2）：跳過，永不降級
+3. 否則，檢查 `vip_current_month_deposit ≥ retain_deposit` 且 `vip_current_month_turnover ≥ retain_turnover` 且 `vip_current_month_active_days ≥ retain_active_days` 是否同時成立：
+   - 全部達成：等級不變，寫入 `VIPAuditLog`，`action_type = RETAIN_SUCCESS`
+   - 任一未達成：等級固定 -1（決策 D3），寫入 `VIPAuditLog`，`action_type = AUTO_DEMOTE`（**不**影響 `vip_lifetime_deposit`/`vip_lifetime_turnover`/`vip_historical_max_level`，決策 D2/D4）
+4. 結算完成後，`vip_current_month_deposit` / `vip_current_month_turnover` / `vip_current_month_active_days` 歸零，開始累積下個月數據
+
+### 3.3 手動調級（後台，決策 D10）
+
+1. 管理員於玩家詳情頁選擇目標等級 + **必填**異動原因
+2. 選填：是否補發跨級的一次性升級獎勵（若勾選，比照 3.1 步驟 3 的跳級補發邏輯）
+3. 系統更新 `Player.vip_level` = 指定等級；`vip_historical_max_level = max(原值, 指定等級)`；**不修改** `vip_lifetime_deposit` / `vip_lifetime_turnover`
+4. 寫入 `VIPAuditLog`，`action_type = MANUAL_ADJUST`，`operator` = 管理員帳號，`remark` = 異動原因
+
+---
+
+## 4. 等級門檻數值草案
+
+由 [vip_threshold_model.py](../decisions/vip_threshold_model.py) 等比成長模型推導，**全部為草案，待你逐級調整**。模型參數與驗證方式見決策紀錄 D13。
+
+| VIP | 名稱(暫定) | 晉升儲值 | 晉升流水 | 保級儲值 | 保級流水 | 保級活躍天 | 手續費% | 返水% | 一次性升級獎勵 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 0 | 鐵牌 | 0 | 0 | - | - | - | - | 0.0 | - |
+| 1 | 銅牌 | 1,000 | 10,000 | - | - | - | - | 0.1 | 銅幣 50 |
+| 2 | 銀牌 | 1,700 | 18,000 | - | - | - | 2.0 | 0.2 | 銅幣 84 |
+| 3 | 金牌 | 2,800 | 32,000 | 1,400 | 16,000 | 8 | 1.75 | 0.3 | 銀幣 140 |
+| 4 | 白金 | 4,800 | 56,000 | 2,400 | 28,000 | 10 | 1.5 | 0.4 | 銀幣 240 |
+| 5 | 琥珀 | 8,100 | 99,000 | 4,000 | 50,000 | 11 | 1.25 | 0.5 | 銀幣 400 |
+| 6 | 翡翠 | 14,000 | 180,000 | 6,800 | 88,000 | 13 | 1.0 | 0.6 | 銀幣 680 |
+| 7 | 藍寶石 | 23,000 | 310,000 | 11,000 | 150,000 | 15 | 0.75 | 0.7 | 銀幣 1,100 |
+| 8 | 紅寶石 | 39,000 | 540,000 | 19,000 | 270,000 | 16 | 0.5 | 0.8 | 銀幣 1,900 |
+| 9 | 鑽石 | 65,000 | 950,000 | 33,000 | 480,000 | 18 | 0.25 | 0.9 | 銀幣 3,300 |
+| 10 | 黑耀 | 110,000 | 1,700,000 | 55,000 | 830,000 | 20 | 0.0 | 1.0 | 銀幣 5,500 |
+| 11 | 皇冠 | 190,000 | 2,900,000 | 93,000 | 1,500,000 | 21 | 0.0 | 1.1 | 銀幣 9,300 |
+| 12 | 王者 | 310,000 | 5,100,000 | 160,000 | 2,500,000 | 23 | 0.0 | 1.2 | 銀幣 16,000 |
+| 13 | 帝王 | 530,000 | 8,900,000 | 260,000 | 4,400,000 | 25 | 0.0 | 1.3 | 銀幣 26,000 |
+| 14 | 至尊 | 890,000 | 16,000,000 | 440,000 | 7,800,000 | 26 | 0.0 | 1.4 | 銀幣 44,000 |
+| 15 | 無極 | 1,500,000 | 27,000,000 | 750,000 | 13,000,000 | 28 | 0.0 | 1.5 | 銀幣 75,000 |
+
+**模型假設與已知限制（需要你判斷是否合理）：**
+- VIP0~2 無保級條件（決策沿用「入門三級無條件保級」的慣例，可調整）
+- 保級門檻 = 晉升門檻的 50%（固定比例假設，未必符合實際營運考量）
+- 流水/儲值倍率從 10 倍（VIP1）線性長到 18 倍（VIP15）——代表模型假設「等級越高的玩家資金週轉率越快」，這個假設沒有真實數據佐證，`not_stated`
+- 一次性獎勵 = 月保級儲值門檻的 10%，四捨五入到好記數字——同樣是假設比例，非精算結果
+- 用合成玩家分布模擬得出「VIP10 以上幾乎沒人摸得到」的結果，是否符合你要的頂級稀有度，需要你依實際玩家儲值分布判斷（模擬用的是假設分布，不是真實數據，`not_stated`）
+- **手續費/返水的實際成本是否在可負擔範圍內，需要你提供平台實際的 house edge / GGR margin 才能驗證，目前無法驗證，`not_stated`**
+
+---
+
+## 5. OPE-1003 VIP 統計分析（設計提案）
+
+延續原規格書的統計指標定義（該部分未被判定為有爭議，予以保留，但底層資料來源改為由 3.1/3.2 的引擎產出，而非寫死假資料）：
+
+| 指標 | 公式 |
+|---|---|
+| 當前分佈比例 | 該等級上月底總人數 / 全平台上月底總人數 |
+| 留存率 | (上月初為等級 N 且月底仍為 N 的人數) / 上月初等級 N 總人數 |
+| 降級率 | (上月初為等級 N 且月底 < N 的人數) / 上月初等級 N 總人數 |
+| 升級率 | (上月初為等級 N 且月底 > N 的人數) / 上月初等級 N 總人數 |
+
+畫面需求（沿用現有 [VIPStats.vue](../../src/views/DataCenter/VIPStats.vue) 已實作的圓餅圖點擊聯動骨架，補上目前缺的部分）：
+- 分母為 0 時顯示「無數據 N/A」，不得顯示錯誤或 0%（現況缺漏，需補）
+- 列表「編輯」需跳轉到 VIP 等級設定對應等級的編輯畫面（現況缺漏，需補）
+- 明確標示「數據結算至 YYYY/MM/DD」與統計區間（現況已有 `settledDate` 展示，格式維持）
+
+## 6. OPE-1004 VIP 升降級稽核（設計提案）
+
+依 2.3 節 `VIPAuditLog` 型別建立列表頁：
+- 可依玩家帳號精確搜尋
+- 顯示：原等級、新等級、動作類型、觸發原因、參考條件快照（展開查看 JSON）、操作人員、操作時間、備註
+- V1 版本一次撈取所有紀錄，時間倒序排列（沿用原規格書 AC-5 的驗收標準，判定為合理沒有爭議）
+
+---
+
+## 7. 這次後台原型的範圍（對應「純設定介面」決策）
+
+這輪只重建**設定與展示介面**，不做模擬引擎（月結批次、快照同步等真正的排程邏輯留待後端排期）。原型具體要做的事：
+1. 依第 2 節更新 `types/vip.ts`、`types/player.ts`，新增 `VIPAuditLog` 型別
+2. `VIPSettings.vue`：補上狀態（啟用/停用）欄位、排序唯一性檢查、最後編輯者/修改時間顯示、圖示上傳的檔案類型與大小限制（5MB, .svg/.png/.jpg/.webp）、拿掉 `bind_data` 特殊條件表單（決策 D11）
+3. 新增稽核日誌頁面（OPE-1004），用符合新資料結構的假資料展示畫面骨架
+4. `VIPStats.vue`：補上「分母為 0 顯示 N/A」與「編輯跳轉」；統計數字本輪**仍維持靜態假資料**（因為沒有真正的月結引擎去算，需明確標示這點，避免被誤認為即時數據）
+5. 玩家詳情頁的「手動調級」彈窗：加上必填異動原因欄位、是否補發跨級獎勵的選項，串接寫入稽核日誌（假資料層級）
+
+---
+
+## 8. 待你確認的事項（彙整）
+
+1. 第 4 節的門檻數值草案——請逐級檢視是否符合預期，尤其 VIP10 以上幾乎無人能達成這件事是否是你要的效果
+2. 等級名稱是否維持現有 16 個中文名稱，或要重新命名
+3. 手續費/返水的實際成本是否在可接受範圍——需要你提供平台的 house edge/GGR margin 數據才能驗證
+4. 週期性獎勵（零用金/生日禮/安慰金）何時要排入下一輪討論
