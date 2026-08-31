@@ -669,7 +669,7 @@ onMounted(fetchVIPData)
                             </NSwitch>
                         </div>
                     </NDivider>
-                    <NFormItem label="保級截止時間" :required="settingsLevel.rank > 0">
+                    <NFormItem label="無條件保級截止時間" :required="settingsLevel.rank > 0">
                         <div class="w-full">
                             <NDatePicker
                                 v-model:formatted-value="settingsLevel.retention_deadline"
@@ -679,7 +679,7 @@ onMounted(fetchVIPData)
                                 format="yyyy-MM-dd HH:mm:ss"
                                 :disabled="!settingsLevel.is_perpetual || settingsLevel.rank === 0"
                                 style="width: 100%"
-                                placeholder="請選擇保級截止日期與時間"
+                                placeholder="請選擇無條件保級截止日期與時間"
                             />
                             <p class="mt-1 text-xs" :class="settingsLevel.is_perpetual ? 'text-amber-600' : 'text-slate-500'">{{ getRetentionDeadlineHint(settingsLevel) }}</p>
                         </div>
