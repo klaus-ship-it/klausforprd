@@ -14,6 +14,7 @@ const mockVIPLevels: VIPLevel[] = [
         promo_turnover: 0,
         bind_data: 'none',
         is_perpetual: true,
+        retention_deadline: null,
         retain_deposit: 0,
         retain_turnover: 0,
         retain_active_days: 0,

@@ -32,6 +32,7 @@ export interface VIPLevel {
 
     // Retention Criteria
     is_perpetual: boolean // 無條件保級
+    retention_deadline?: string | null // 無條件保級的生效截止時間；到期後依條件保級
     retain_deposit: number // 當月儲值（保級判定用）
     retain_turnover: number // 當月投注額（保級判定用）
     retain_active_days: number // 當月活躍天數（可啟用的保級判定條件）

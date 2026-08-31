@@ -62,6 +62,7 @@ const resetLevel = (rank: number) => {
         status: isNewLevel.value ? 'INACTIVE' : 'ACTIVE',
         level_source: isNewLevel.value ? 'OPERATOR_CREATED' : 'DEFAULT',
         is_perpetual: false,
+        retention_deadline: null,
         retain_deposit: 0,
         retain_turnover: 0,
         retain_active_days: 0,
@@ -129,7 +130,11 @@ const columns: DataTableColumns<VIPLevel> = [
         key: 'retention_desc', 
         minWidth: 200,
         render(row) {
-            return h('div', { class: 'text-xs text-gray-500 whitespace-pre-wrap' }, row.retention_desc)
+            const deadline = row.is_perpetual && row.retention_deadline ? `無條件保級至 ${row.retention_deadline}` : ''
+            return h('div', { class: 'text-xs text-gray-500 whitespace-pre-wrap' }, [
+                h('div', row.retention_desc || (row.is_perpetual ? '無條件保級' : '尚未設定')),
+                deadline ? h('div', { class: 'text-amber-600 mt-1' }, deadline) : null
+            ])
         }
     },
     {
@@ -234,6 +239,7 @@ const editingLevel = reactive<VIPLevel>({
     upgrade_reward_turnover_multiplier: 0,
     upgrade_reward_conversion_cap: 0,
     is_perpetual: false,
+    retention_deadline: null,
     retain_deposit: 0,
     retain_turnover: 0,
     retain_active_days: 0,
@@ -255,6 +261,7 @@ const settingsLevel = reactive<VIPLevel>({
     upgrade_reward_turnover_multiplier: 0,
     upgrade_reward_conversion_cap: 0,
     is_perpetual: false,
+    retention_deadline: null,
     retain_deposit: 0,
     retain_turnover: 0,
     retain_active_days: 0,
@@ -285,6 +292,7 @@ const handleEdit = (row: VIPLevel) => {
         upgrade_reward_desc_zh_tw: row.upgrade_reward_desc_zh_tw || row.upgrade_reward_desc || '',
         upgrade_reward_desc_zh_cn: row.upgrade_reward_desc_zh_cn || '',
         upgrade_reward_desc_en: row.upgrade_reward_desc_en || '',
+        retention_deadline: row.retention_deadline || null,
         ...JSON.parse(JSON.stringify(row))
     })
     showEditModal.value = true
@@ -299,6 +307,7 @@ const handleAdd = () => {
 
 const handleSettings = (row: VIPLevel) => {
     Object.assign(settingsLevel, JSON.parse(JSON.stringify(row)))
+    settingsLevel.retention_deadline = row.retention_deadline || null
     showSettingsModal.value = true
 }
 
@@ -321,6 +330,7 @@ const handleToggleStatus = async (row: VIPLevel) => {
                 return
             }
         }
+        if (!validateRetentionDeadline(row)) return
         if (!validateLevelCriteria(row)) return
     }
     const res = await vipApi.toggleVIPLevel(row.rank, nextStatus)
@@ -333,6 +343,44 @@ const handleToggleStatus = async (row: VIPLevel) => {
     } else {
         message.error(res.msg || '狀態修改失敗')
     }
+}
+
+const validateRetentionDeadline = (level: VIPLevel) => {
+    if (level.rank === 0) return true
+    const deadline = (level.retention_deadline || '').trim()
+    const hasAnyRetentionValue = Number(level.retain_deposit || 0) > 0 || Number(level.retain_turnover || 0) > 0 || Number(level.retain_active_days || 0) > 0
+    if (level.is_perpetual) {
+        if (!deadline || deadline === '0') {
+            message.error('無條件保級必須設定保級截止時間，且不可為 0')
+            return false
+        }
+        if (Number.isNaN(Date.parse(deadline.replace(' ', 'T')))) {
+            message.error('保級截止時間格式錯誤，請使用 YYYY-MM-DD HH:mm:ss')
+            return false
+        }
+        if (!hasAnyRetentionValue) {
+            message.error('無條件保級仍須設定當月儲值、當月投注或當月活躍其中一項')
+            return false
+        }
+    } else if (deadline) {
+        message.error('有條件保級不可設定保級截止時間，請清空欄位')
+        return false
+    }
+    return true
+}
+
+const getRetentionDeadlineHint = (level: VIPLevel) => {
+    if (level.rank === 0) return 'VIP0 為系統固定基礎等級，不適用保級截止時間。'
+    if (!level.is_perpetual) return '目前為有條件保級；保級截止時間必須保持空白。'
+    if (!level.retention_deadline) return '目前為無條件保級，請設定截止時間。'
+    const parsed = Date.parse(level.retention_deadline.replace(' ', 'T'))
+    if (!Number.isNaN(parsed) && parsed <= Date.now()) return '截止時間已到，會員將依當月保級條件判定。'
+    return '截止時間前視為無條件保級；到期後自動改依當月保級條件判定。'
+}
+
+const handleRetentionModeChange = (isPerpetual: boolean) => {
+    // 切換為有條件保級時，截止時間不得殘留，避免送出矛盾設定。
+    if (!isPerpetual) settingsLevel.retention_deadline = null
 }
 
 const validateLevelCriteria = (level: VIPLevel) => {
@@ -380,7 +428,7 @@ const validateLevelCriteria = (level: VIPLevel) => {
 
 const handleSave = async (isSettings: boolean = false) => {
     const dataToSave = isSettings ? settingsLevel : editingLevel
-    if (isSettings && !validateLevelCriteria(dataToSave)) return
+    if (isSettings && (!validateRetentionDeadline(dataToSave) || !validateLevelCriteria(dataToSave))) return
     try {
         const res = isNewLevel.value && !isSettings
             ? await vipApi.createVIPLevel(dataToSave as VIPLevel)
@@ -615,35 +663,42 @@ onMounted(fetchVIPData)
                     <NDivider title-placement="left">
                         <div class="flex items-center gap-3">
                             <span>保級條件</span>
-                            <NSwitch v-model:value="settingsLevel.is_perpetual" :checked-value="false" :unchecked-value="true">
+                            <NSwitch v-model:value="settingsLevel.is_perpetual" :checked-value="false" :unchecked-value="true" @update:value="handleRetentionModeChange">
                                 <template #checked>開啟 (需保級)</template>
                                 <template #unchecked>關閉 (無條件保級)</template>
                             </NSwitch>
                         </div>
                     </NDivider>
+                    <NFormItem label="保級截止時間" :required="settingsLevel.rank > 0">
+                        <div class="w-full">
+                            <NInput v-model:value="settingsLevel.retention_deadline" :disabled="!settingsLevel.is_perpetual || settingsLevel.rank === 0" placeholder="YYYY-MM-DD HH:mm:ss，例如 2026-12-31 23:59:59" />
+                            <p class="mt-1 text-xs" :class="settingsLevel.is_perpetual ? 'text-amber-600' : 'text-slate-500'">{{ getRetentionDeadlineHint(settingsLevel) }}</p>
+                        </div>
+                    </NFormItem>
                     <NGrid :cols="3" :x-gap="24">
                         <NGridItem>
-                            <NFormItem label="當月儲值金額">
-                                <NInputNumber :disabled="settingsLevel.is_perpetual" v-model:value="settingsLevel.retain_deposit" :min="0" style="width: 100%" />
+                            <NFormItem label="當月儲值金額（至少填一項）">
+                                <NInputNumber v-model:value="settingsLevel.retain_deposit" :min="0" style="width: 100%" />
                             </NFormItem>
                         </NGridItem>
                         <NGridItem>
-                            <NFormItem label="當月投注額">
-                                <NInputNumber :disabled="settingsLevel.is_perpetual" v-model:value="settingsLevel.retain_turnover" :min="0" style="width: 100%" />
+                            <NFormItem label="當月投注額（至少填一項）">
+                                <NInputNumber v-model:value="settingsLevel.retain_turnover" :min="0" style="width: 100%" />
                             </NFormItem>
                         </NGridItem>
                         <NGridItem>
-                            <NFormItem label="當月活躍天數">
-                                <NInputNumber :disabled="settingsLevel.is_perpetual" v-model:value="settingsLevel.retain_active_days" :min="0" style="width: 100%" />
+                            <NFormItem label="當月活躍天數（至少填一項）">
+                                <NInputNumber v-model:value="settingsLevel.retain_active_days" :min="0" style="width: 100%" />
                             </NFormItem>
                         </NGridItem>
                     </NGrid>
+                    <p class="text-xs text-slate-500 mt-1">無條件保級期間不檢查上述門檻；三個欄位至少填一項，供截止後切換為有條件保級時使用。</p>
                     
                     <NDivider title-placement="left">VIP 權益設定</NDivider>
                     <NFormItem label="P2P 贈禮手續費 (%)">
                         <NInputNumber v-model:value="settingsLevel.gift_fee_rate" :min="0" :max="100" style="width: 100%" />
                     </NFormItem>
-                    <p class="text-xs text-slate-500 mt-3">VIP0 為系統固定基礎等級；VIP1 以上不預設，由營運新增並完成設定後啟用。升級可配置「歷史總儲值」＋「當月總投注額」及綁定資料條件；保級可啟用當月儲值、投注與活躍天數條件。</p>
+                    <p class="text-xs text-slate-500 mt-3">VIP0 為系統固定基礎等級；VIP1 以上不預設，由營運新增並完成設定後啟用。升級可配置「歷史總儲值」＋「當月總投注額」及綁定資料條件；保級可啟用當月儲值、投注與活躍天數條件，並可設定暫時無條件保級的截止時間。</p>
                     <p class="text-xs text-amber-600 mt-2">規則：已填寫的晉級／保級數值必須等於或高於上一個階級；未設定的選填條件不納入比較。</p>
                     
                 </NForm>
