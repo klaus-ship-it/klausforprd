@@ -3,7 +3,7 @@ import { ref, onMounted, reactive, h } from 'vue'
 import { 
     NCard, NDataTable, NButton, NModal, NForm, NFormItem, NInput, 
     NInputNumber, NUpload, NSwitch, NTag, NIcon, useMessage, 
-    DataTableColumns, UploadFileInfo, NGrid, NGridItem, NDivider, NUploadDragger, NText, NSelect, NAvatar, NTabs, NTabPane
+    DataTableColumns, UploadFileInfo, NGrid, NGridItem, NDivider, NUploadDragger, NText, NSelect, NAvatar, NTabs, NTabPane, NDatePicker
 } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { 
@@ -371,11 +371,11 @@ const validateRetentionDeadline = (level: VIPLevel) => {
 
 const getRetentionDeadlineHint = (level: VIPLevel) => {
     if (level.rank === 0) return 'VIP0 為系統固定基礎等級，不適用保級截止時間。'
-    if (!level.is_perpetual) return '目前為有條件保級；保級截止時間必須保持空白。'
-    if (!level.retention_deadline) return '目前為無條件保級，請設定截止時間。'
+    if (!level.is_perpetual) return '有條件保級不使用截止時間，欄位應保持空白。'
+    if (!level.retention_deadline) return '請設定截止時間；截止前無條件保級，截止後依當月條件判定。'
     const parsed = Date.parse(level.retention_deadline.replace(' ', 'T'))
-    if (!Number.isNaN(parsed) && parsed <= Date.now()) return '截止時間已到，會員將依當月保級條件判定。'
-    return '截止時間前視為無條件保級；到期後自動改依當月保級條件判定。'
+    if (!Number.isNaN(parsed) && parsed <= Date.now()) return '截止時間已到，現在依當月儲值、投注、活躍天數條件判定。'
+    return '截止時間前為無條件保級；到期後改依當月儲值、投注、活躍天數條件判定。'
 }
 
 const handleRetentionModeChange = (isPerpetual: boolean) => {
@@ -671,7 +671,16 @@ onMounted(fetchVIPData)
                     </NDivider>
                     <NFormItem label="保級截止時間" :required="settingsLevel.rank > 0">
                         <div class="w-full">
-                            <NInput v-model:value="settingsLevel.retention_deadline" :disabled="!settingsLevel.is_perpetual || settingsLevel.rank === 0" placeholder="YYYY-MM-DD HH:mm:ss，例如 2026-12-31 23:59:59" />
+                            <NDatePicker
+                                v-model:formatted-value="settingsLevel.retention_deadline"
+                                type="datetime"
+                                clearable
+                                value-format="yyyy-MM-dd HH:mm:ss"
+                                format="yyyy-MM-dd HH:mm:ss"
+                                :disabled="!settingsLevel.is_perpetual || settingsLevel.rank === 0"
+                                style="width: 100%"
+                                placeholder="請選擇保級截止日期與時間"
+                            />
                             <p class="mt-1 text-xs" :class="settingsLevel.is_perpetual ? 'text-amber-600' : 'text-slate-500'">{{ getRetentionDeadlineHint(settingsLevel) }}</p>
                         </div>
                     </NFormItem>
