@@ -213,6 +213,15 @@ const columns: DataTableColumns<VIPLevel> = [
 // Modal State
 const showEditModal = ref(false)
 const showSettingsModal = ref(false)
+const showDisableConfirmModal = ref(false)
+const showInactiveImpactModal = ref(false)
+const pendingStatusLevel = ref<VIPLevel | null>(null)
+const pendingSave = ref<{ isSettings: boolean } | null>(null)
+// 原型用示範資料；正式版由會員統計 API 回傳各 VIP 等級即時人數。
+const memberCountByVip = reactive<Record<number, number>>({
+    0: 1280, 1: 620, 2: 318, 3: 176, 4: 92, 5: 41
+})
+const getMemberCount = (rank: number) => memberCountByVip[rank] ?? 0
 
 const editingLevel = reactive<VIPLevel>({
     rank: 0,
@@ -311,7 +320,7 @@ const handleSettings = (row: VIPLevel) => {
     showSettingsModal.value = true
 }
 
-const handleToggleStatus = async (row: VIPLevel) => {
+const applyToggleStatus = async (row: VIPLevel) => {
     const nextStatus = row.status === 'INACTIVE' ? 'ACTIVE' : 'INACTIVE'
     if (nextStatus === 'ACTIVE') {
         if (!row.name?.trim()) {
@@ -343,6 +352,23 @@ const handleToggleStatus = async (row: VIPLevel) => {
     } else {
         message.error(res.msg || '狀態修改失敗')
     }
+}
+
+const handleToggleStatus = (row: VIPLevel) => {
+    // 停用會改變後續升降級可通過的等級，先由運營商確認影響範圍。
+    if (row.status !== 'INACTIVE') {
+        pendingStatusLevel.value = row
+        showDisableConfirmModal.value = true
+        return
+    }
+    void applyToggleStatus(row)
+}
+
+const confirmDisableLevel = async () => {
+    const row = pendingStatusLevel.value
+    showDisableConfirmModal.value = false
+    pendingStatusLevel.value = null
+    if (row) await applyToggleStatus(row)
 }
 
 const validateRetentionDeadline = (level: VIPLevel) => {
@@ -426,9 +452,8 @@ const validateLevelCriteria = (level: VIPLevel) => {
     return true
 }
 
-const handleSave = async (isSettings: boolean = false) => {
+const executeSave = async (isSettings: boolean = false) => {
     const dataToSave = isSettings ? settingsLevel : editingLevel
-    if (isSettings && (!validateRetentionDeadline(dataToSave) || !validateLevelCriteria(dataToSave))) return
     try {
         const res = isNewLevel.value && !isSettings
             ? await vipApi.createVIPLevel(dataToSave as VIPLevel)
@@ -445,6 +470,24 @@ const handleSave = async (isSettings: boolean = false) => {
     } catch (e) {
         message.error(t('common.error'))
     }
+}
+
+const handleSave = async (isSettings: boolean = false) => {
+    const dataToSave = isSettings ? settingsLevel : editingLevel
+    if (isSettings && (!validateRetentionDeadline(dataToSave) || !validateLevelCriteria(dataToSave))) return
+    if (dataToSave.status === 'INACTIVE' && getMemberCount(dataToSave.rank) > 0) {
+        pendingSave.value = { isSettings }
+        showInactiveImpactModal.value = true
+        return
+    }
+    await executeSave(isSettings)
+}
+
+const confirmInactiveImpactSave = async () => {
+    const saveRequest = pendingSave.value
+    showInactiveImpactModal.value = false
+    pendingSave.value = null
+    if (saveRequest) await executeSave(saveRequest.isSettings)
 }
 
 const saveGlobalConfig = async () => {
@@ -718,6 +761,22 @@ onMounted(fetchVIPData)
                     <NButton type="warning" @click="() => handleSave(true)" rounded>{{ t('common.save') }}條件</NButton>
                 </div>
             </template>
+        </NModal>
+
+        <!-- Disable confirmation: disable only skips this level for future transitions; existing members are unaffected. -->
+        <NModal v-model:show="showDisableConfirmModal" preset="dialog" type="warning" title="運營商停用 VIP 等級確認" positive-text="確認停用" negative-text="取消" :mask-closable="false" @positive-click="confirmDisableLevel">
+            <p v-if="pendingStatusLevel" class="leading-6">
+                停用 VIP {{ pendingStatusLevel.rank }}（{{ pendingStatusLevel.name }}）後，其他 VIP 等級的會員在升級或降級判定時會略過此等級；目前已在此等級的會員不受影響，仍可正常升級、降級並享有原有 VIP 權益。
+            </p>
+            <p class="mt-2 text-xs text-slate-500">停用只影響後續等級流轉，不會移除會員目前等級或既有權益。</p>
+        </NModal>
+
+        <!-- Saving a disabled level requires a second impact confirmation. -->
+        <NModal v-model:show="showInactiveImpactModal" preset="dialog" type="warning" title="運營商保存停用等級資料確認" positive-text="繼續保存" negative-text="取消" :mask-closable="false" @positive-click="confirmInactiveImpactSave">
+            <p v-if="pendingSave">
+                目前 VIP {{ (pendingSave.isSettings ? settingsLevel : editingLevel).rank }} 等級下有 <strong>{{ getMemberCount((pendingSave.isSettings ? settingsLevel : editingLevel).rank) }} 人</strong>，您的操作將會影響此 VIP 的會員，請問是否繼續？
+            </p>
+            <p class="mt-2 text-xs text-slate-500">停用狀態下保存的設定，將套用於此等級既有會員的權益與後續資料呈現；不會自動移轉會員等級。</p>
         </NModal>
     </div>
 </template>
