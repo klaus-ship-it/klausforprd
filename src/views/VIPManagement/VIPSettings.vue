@@ -217,6 +217,8 @@ const showDisableConfirmModal = ref(false)
 const showInactiveImpactModal = ref(false)
 const pendingStatusLevel = ref<VIPLevel | null>(null)
 const pendingSave = ref<{ isSettings: boolean } | null>(null)
+// 新增等級建立後的首次設定屬於初始化，不應被視為停用等級的異動確認。
+const initialSetupPendingRanks = reactive(new Set<number>())
 // 原型用示範資料；正式版由會員統計 API 回傳各 VIP 等級即時人數。
 const memberCountByVip = reactive<Record<number, number>>({
     0: 1280, 1: 620, 2: 318, 3: 176, 4: 92, 5: 41
@@ -454,12 +456,15 @@ const validateLevelCriteria = (level: VIPLevel) => {
 
 const executeSave = async (isSettings: boolean = false) => {
     const dataToSave = isSettings ? settingsLevel : editingLevel
+    const creating = isNewLevel.value && !isSettings
     try {
-        const res = isNewLevel.value && !isSettings
+        const res = creating
             ? await vipApi.createVIPLevel(dataToSave as VIPLevel)
             : await vipApi.updateVIPLevel(dataToSave as VIPLevel)
         if (res.code === 0) {
             message.success(t('common.success'))
+            if (creating) initialSetupPendingRanks.add(dataToSave.rank)
+            else initialSetupPendingRanks.delete(dataToSave.rank)
             if (isSettings) showSettingsModal.value = false
             else showEditModal.value = false
             fetchVIPData()
@@ -475,7 +480,9 @@ const executeSave = async (isSettings: boolean = false) => {
 const handleSave = async (isSettings: boolean = false) => {
     const dataToSave = isSettings ? settingsLevel : editingLevel
     if (isSettings && (!validateRetentionDeadline(dataToSave) || !validateLevelCriteria(dataToSave))) return
-    if (dataToSave.status === 'INACTIVE' && getMemberCount(dataToSave.rank) > 0) {
+    const isCreating = isNewLevel.value && !isSettings
+    const isInitialSetup = initialSetupPendingRanks.has(dataToSave.rank)
+    if (!isCreating && !isInitialSetup && dataToSave.status === 'INACTIVE' && getMemberCount(dataToSave.rank) > 0) {
         pendingSave.value = { isSettings }
         showInactiveImpactModal.value = true
         return
